@@ -1,0 +1,296 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "Untitled5.ipynb",
+      "provenance": [],
+      "collapsed_sections": [],
+      "toc_visible": true,
+      "authorship_tag": "ABX9TyMdsaiSKUKJzgln5uDbKkQs",
+      "include_colab_link": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "view-in-github",
+        "colab_type": "text"
+      },
+      "source": [
+        "<a href=\"https://colab.research.google.com/github/ANANTH-prog/Speaker-Diarization/blob/main/Multi%20speaker%20Diarization\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        },
+        "id": "H0En33eDwX8P",
+        "outputId": "9c4d3c59-d62a-4c35-b0ca-eec4b3b58ada"
+      },
+      "source": [
+        "pip install webrtcvad"
+      ],
+      "execution_count": 2,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "Collecting webrtcvad\n",
+            "\u001b[?25l  Downloading https://files.pythonhosted.org/packages/89/34/e2de2d97f3288512b9ea56f92e7452f8207eb5a0096500badf9dfd48f5e6/webrtcvad-2.0.10.tar.gz (66kB)\n",
+            "\r\u001b[K     |█████                           | 10kB 10.7MB/s eta 0:00:01\r\u001b[K     |██████████                      | 20kB 8.7MB/s eta 0:00:01\r\u001b[K     |██████████████▉                 | 30kB 6.6MB/s eta 0:00:01\r\u001b[K     |███████████████████▉            | 40kB 6.3MB/s eta 0:00:01\r\u001b[K     |████████████████████████▊       | 51kB 4.4MB/s eta 0:00:01\r\u001b[K     |█████████████████████████████▊  | 61kB 4.6MB/s eta 0:00:01\r\u001b[K     |████████████████████████████████| 71kB 2.9MB/s \n",
+            "\u001b[?25hBuilding wheels for collected packages: webrtcvad\n",
+            "  Building wheel for webrtcvad (setup.py) ... \u001b[?25l\u001b[?25hdone\n",
+            "  Created wheel for webrtcvad: filename=webrtcvad-2.0.10-cp37-cp37m-linux_x86_64.whl size=72252 sha256=88820af18eca633f0b4fc6dd26aed98ec23fb6cf4dcf4af753bf65c894591d3a\n",
+            "  Stored in directory: /root/.cache/pip/wheels/44/2a/18/bd1aec41cac7c3051fe95d92a6ed446122ea31dc713c432fa1\n",
+            "Successfully built webrtcvad\n",
+            "Installing collected packages: webrtcvad\n",
+            "Successfully installed webrtcvad-2.0.10\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "l-okeTD0xMzX"
+      },
+      "source": [
+        "import collections\n",
+        "import contextlib\n",
+        "import sys\n",
+        "import wave\n",
+        "import webrtcvad\n",
+        "import os\n",
+        "import librosa"
+      ],
+      "execution_count": 3,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "7rw9RJRowc6D"
+      },
+      "source": [
+        "def read_wave(path):\n",
+        "    \"\"\"Reads a .wav file.\n",
+        "    Takes the path, and returns (PCM audio data, sample rate).\n",
+        "    \"\"\"\n",
+        "    with contextlib.closing(wave.open(path, 'rb')) as wf:\n",
+        "        num_channels = wf.getnchannels()\n",
+        "        assert num_channels == 1\n",
+        "        sample_width = wf.getsampwidth()\n",
+        "        assert sample_width == 2\n",
+        "        sample_rate = wf.getframerate()\n",
+        "        assert sample_rate in (8000, 16000, 32000, 48000)\n",
+        "        pcm_data = wf.readframes(wf.getnframes())\n",
+        "        return pcm_data, sample_rate\n",
+        "\n",
+        "\n",
+        "def write_wave(path, audio, sample_rate):\n",
+        "    \"\"\"Writes a .wav file.\n",
+        "    Takes path, PCM audio data, and sample rate.\n",
+        "    \"\"\"\n",
+        "    with contextlib.closing(wave.open(path, 'wb')) as wf:\n",
+        "        wf.setnchannels(1)\n",
+        "        wf.setsampwidth(2)\n",
+        "        wf.setframerate(sample_rate)\n",
+        "        wf.writeframes(audio)\n",
+        "\n",
+        "\n",
+        "class Frame(object):\n",
+        "    \"\"\"Represents a \"frame\" of audio data.\"\"\"\n",
+        "    def __init__(self, bytes, timestamp, duration):\n",
+        "        self.bytes = bytes\n",
+        "        self.timestamp = timestamp\n",
+        "        self.duration = duration\n",
+        "\n",
+        "\n",
+        "def frame_generator(frame_duration_ms, audio, sample_rate):\n",
+        "    \"\"\"Generates audio frames from PCM audio data.\n",
+        "    Takes the desired frame duration in milliseconds, the PCM data, and\n",
+        "    the sample rate.\n",
+        "    Yields Frames of the requested duration.\n",
+        "    \"\"\"\n",
+        "    n = int(sample_rate * (frame_duration_ms / 1000.0) * 2)\n",
+        "    offset = 0\n",
+        "    timestamp = 0.0\n",
+        "    duration = (float(n) / sample_rate) / 2.0\n",
+        "    while offset + n < len(audio):\n",
+        "        yield Frame(audio[offset:offset + n], timestamp, duration)\n",
+        "        timestamp += duration\n",
+        "        offset += n"
+      ],
+      "execution_count": 4,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "5K6xuq1bwlT9"
+      },
+      "source": [
+        "def vad_collector(sample_rate, frame_duration_ms,\n",
+        "                  padding_duration_ms, vad, frames):\n",
+        "    \"\"\"Filters out non-voiced audio frames.\n",
+        "    Given a webrtcvad.Vad and a source of audio frames, yields only\n",
+        "    the voiced audio.\n",
+        "    Uses a padded, sliding window algorithm over the audio frames.\n",
+        "    When more than 90% of the frames in the window are voiced (as\n",
+        "    reported by the VAD), the collector triggers and begins yielding\n",
+        "    audio frames. Then the collector waits until 90% of the frames in\n",
+        "    the window are unvoiced to detrigger.\n",
+        "    The window is padded at the front and back to provide a small\n",
+        "    amount of silence or the beginnings/endings of speech around the\n",
+        "    voiced frames.\n",
+        "    Arguments:\n",
+        "    sample_rate - The audio sample rate, in Hz.\n",
+        "    frame_duration_ms - The frame duration in milliseconds.\n",
+        "    padding_duration_ms - The amount to pad the window, in milliseconds.\n",
+        "    vad - An instance of webrtcvad.Vad.\n",
+        "    frames - a source of audio frames (sequence or generator).\n",
+        "    Returns: A generator that yields PCM audio data.\n",
+        "    \"\"\"\n",
+        "    num_padding_frames = int(padding_duration_ms / frame_duration_ms)\n",
+        "    # We use a deque for our sliding window/ring buffer.\n",
+        "    ring_buffer = collections.deque(maxlen=num_padding_frames)\n",
+        "    # We have two states: TRIGGERED and NOTTRIGGERED. We start in the\n",
+        "    # NOTTRIGGERED state.\n",
+        "    triggered = False\n",
+        "\n",
+        "    voiced_frames = []\n",
+        "    for frame in frames:\n",
+        "        is_speech = vad.is_speech(frame.bytes, sample_rate)\n",
+        "\n",
+        "        sys.stdout.write('1' if is_speech else '0')\n",
+        "        if not triggered:\n",
+        "            ring_buffer.append((frame, is_speech))\n",
+        "            num_voiced = len([f for f, speech in ring_buffer if speech])\n",
+        "            # If we're NOTTRIGGERED and more than 90% of the frames in\n",
+        "            # the ring buffer are voiced frames, then enter the\n",
+        "            # TRIGGERED state.\n",
+        "            if num_voiced > 0.9 * ring_buffer.maxlen:\n",
+        "                triggered = True\n",
+        "                sys.stdout.write('+(%s)' % (ring_buffer[0][0].timestamp,))\n",
+        "                # We want to yield all the audio we see from now until\n",
+        "                # we are NOTTRIGGERED, but we have to start with the\n",
+        "                # audio that's already in the ring buffer.\n",
+        "                for f, s in ring_buffer:\n",
+        "                    voiced_frames.append(f)\n",
+        "                ring_buffer.clear()\n",
+        "        else:\n",
+        "            # We're in the TRIGGERED state, so collect the audio data\n",
+        "            # and add it to the ring buffer.\n",
+        "            voiced_frames.append(frame)\n",
+        "            ring_buffer.append((frame, is_speech))\n",
+        "            num_unvoiced = len([f for f, speech in ring_buffer if not speech])\n",
+        "            # If more than 90% of the frames in the ring buffer are\n",
+        "            # unvoiced, then enter NOTTRIGGERED and yield whatever\n",
+        "            # audio we've collected.\n",
+        "            if num_unvoiced > 0.9 * ring_buffer.maxlen:\n",
+        "                sys.stdout.write('-(%s)' % (frame.timestamp + frame.duration))\n",
+        "                triggered = False\n",
+        "                yield b''.join([f.bytes for f in voiced_frames])\n",
+        "                ring_buffer.clear()\n",
+        "                voiced_frames = []\n",
+        "    if triggered:\n",
+        "        sys.stdout.write('-(%s)' % (frame.timestamp + frame.duration))\n",
+        "    sys.stdout.write('\\n')\n",
+        "    # If we have any leftover voiced audio when we run out of input,\n",
+        "    # yield it.\n",
+        "    if voiced_frames:\n",
+        "         yield b''.join([f.bytes for f in voiced_frames])"
+      ],
+      "execution_count": 6,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        },
+        "id": "FZGWSHdJwtMW",
+        "outputId": "144e6dac-2f12-42d9-ea9e-0803ad1600df"
+      },
+      "source": [
+        "from sklearn import preprocessing\n",
+        "import numpy as np\n",
+        "from sklearn.mixture import GaussianMixture\n",
+        "from copy import deepcopy\n",
+        "from sklearn.cluster import SpectralClustering\n",
+        "\n",
+        "audio, sample_rate = read_wave('/content/input_test (1).wav')\n",
+        "vad = webrtcvad.Vad(2)\n",
+        "frames = frame_generator(30, audio, sample_rate)\n",
+        "frames = list(frames)\n",
+        "segments = vad_collector(sample_rate, 30, 300, vad, frames)\n",
+        "c = 0\n",
+        "for i, segment in enumerate(segments):\n",
+        "    path = 'chunk-%002d.wav' % (i,)\n",
+        "    print(' Writing %s' % (path,))\n",
+        "    write_wave(path, segment, sample_rate)\n",
+        "    c +=1\n",
+        "#count of chunks\n",
+        "# c = 14\n",
+        "\n",
+        "sampling_rate = 8000\n",
+        "n_mfcc = 13\n",
+        "n_fft = 0.032\n",
+        "hop_length = 0.010\n",
+        "\n",
+        "components = 16\n",
+        "\n",
+        "cov_type = 'full'"
+      ],
+      "execution_count": 8,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "text": [
+            "00001111111111+(0.12)11111111111111111111111111111111111000001111111111111111111111111111111111111111110000000000-(3.179999999999994) Writing chunk-00.wav\n",
+            "000000000000000000000000001111111111+(3.959999999999989)111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111101111111111111111111111111111111111111111111111111111111111111111111111111111111111000000000111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111000001111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(24.42000000000017) Writing chunk-01.wav\n",
+            "000000000001111110111100001111111111+(25.2000000000002)11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(29.25000000000035) Writing chunk-02.wav\n",
+            "0000000000000000001111111111+(29.790000000000372)1111111111111111111111111111111111111110000111111111111111111111111110000000000-(32.46000000000047) Writing chunk-03.wav\n",
+            "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011111100000000000000000000000000000001111111111+(36.33000000000062)11111111111111111111111111111111111100001110111111111111111111111111111111111111111111110000000000-(39.57000000000074) Writing chunk-04.wav\n",
+            "0001111111111+(39.66000000000074)1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(47.73000000000105) Writing chunk-05.wav\n",
+            "0000000000000000000011110001111111111+(48.54000000000108)1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111100000011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(63.450000000001644) Writing chunk-06.wav\n",
+            "000000000000001110001111111111+(64.05000000000166)1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111001110011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(72.03000000000196) Writing chunk-07.wav\n",
+            "000000011100001111111111+(72.45000000000198)1111111111111111111111111111110000000000-(73.95000000000203) Writing chunk-08.wav\n",
+            "000000000000001111111111+(74.37000000000205)1111001111111111111111111111111111111111111111111111111110000000001111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110011100000000011100011100000001111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111100011111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(107.4600000000033) Writing chunk-09.wav\n",
+            "0000000000000000000001111111111+(108.09000000000333)11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(117.36000000000368) Writing chunk-10.wav\n",
+            "0000000000000001111111111+(117.8100000000037)111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110000000000-(122.97000000000389) Writing chunk-11.wav\n",
+            "000000000001110011111111001111111111+(123.75000000000392)111111111111111111111111111111111111111111111111111100001110000000000-(126.12000000000401) Writing chunk-12.wav\n",
+            "0001111111111+(126.21000000000402)111111111111111111111111111111111111111111111110000011110000001111111111111111111111111111111111111111111111111111111111111111111111110000000000-(130.8300000000042) Writing chunk-13.wav\n",
+            "000111000000000000000001111111111+(131.52000000000422)111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111110011111111111111111111111111111111111111111111111111111111111111111111111111111111111110000111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111100111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111000111111111111111111111111111110000000111111111111111111111111111111111111111111111111111111111111000001111111111111111111100111111111-(149.10000000000488)\n",
+            " Writing chunk-14.wav\n"
+          ],
+          "name": "stdout"
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "yEWuA-2Cw83U"
+      },
+      "source": [
+        "test_file_path = sys.argv[1:]\n"
+      ],
+      "execution_count": 10,
+      "outputs": []
+    }
+  ]
+}
